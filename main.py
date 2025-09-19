@@ -59,6 +59,17 @@ class AnytimeTDOddsService:
             logger.error(f"Error converting probability {probability}: {str(e)}")
             return -110  # Default odds
     
+    def decimal_to_american(self, decimal_odds):
+        """Convert decimal odds to American odds"""
+        try:
+            if decimal_odds >= 2.0:
+                return round((decimal_odds - 1) * 100)
+            else:
+                return round(-100 / (decimal_odds - 1))
+        except Exception as e:
+            logger.error(f"Error converting decimal odds {decimal_odds}: {str(e)}")
+            return -110  # Default odds
+    
     def fetch_team_projections(self):
         """Fetch team TD projections from Railway service"""
         try:
@@ -233,11 +244,16 @@ class AnytimeTDOddsService:
         
         for player in player_odds_list:
             try:
-                book_odds = player['book_odds']
+                book_odds_raw = player['book_odds']
                 team = player['team']
                 
-                # Get implied probability from book odds
-                book_probability = self.get_implied_probability(book_odds)
+                # Convert book odds to American format if they're in decimal
+                if book_odds_raw > 0 and book_odds_raw < 10:  # Likely decimal odds
+                    book_odds_american = self.decimal_to_american(book_odds_raw)
+                    book_probability = 1 / book_odds_raw  # Decimal to probability
+                else:
+                    book_odds_american = book_odds_raw
+                    book_probability = self.get_implied_probability(book_odds_raw)
                 
                 # Apply team boost if available
                 boost_factor = team_boosts.get(team, 1.0)
@@ -246,11 +262,14 @@ class AnytimeTDOddsService:
                 # Cap probability at reasonable limits
                 adjusted_probability = max(0.01, min(0.95, adjusted_probability))
                 
-                # Convert back to odds
-                adjusted_odds = self.probability_to_odds(adjusted_probability)
+                # Convert back to American odds
+                adjusted_odds_american = self.probability_to_odds(adjusted_probability)
                 
-                # Calculate boost percentage
+                # Calculate boost percentage and edge
                 boost_pct = ((boost_factor - 1.0) * 100) if boost_factor != 1.0 else 0
+                
+                # Calculate edge (difference in implied probability)
+                edge_pct = ((adjusted_probability - book_probability) * 100)
                 
                 adjusted_player = {
                     'player_name': player['player_name'],
@@ -258,13 +277,15 @@ class AnytimeTDOddsService:
                     'game': player['game'],
                     'commence_time': player['commence_time'],
                     'bookmaker': player['bookmaker'],
-                    'book_odds': book_odds,
+                    'book_odds': book_odds_american,
+                    'adjusted_odds': adjusted_odds_american,
                     'book_probability': round(book_probability, 3),
+                    'adjusted_probability': round(adjusted_probability, 3),
                     'team_boost_factor': round(boost_factor, 3),
                     'team_boost_pct': round(boost_pct, 1),
-                    'adjusted_probability': round(adjusted_probability, 3),
-                    'adjusted_odds': adjusted_odds,
-                    'has_boost': boost_factor != 1.0
+                    'edge_pct': round(edge_pct, 1),
+                    'has_boost': boost_factor != 1.0,
+                    'has_edge': abs(edge_pct) > 0.1
                 }
                 
                 adjusted_players.append(adjusted_player)
