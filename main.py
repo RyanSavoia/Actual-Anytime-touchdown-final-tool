@@ -19,7 +19,7 @@ class AnytimeTDOddsCalculator:
         self.player_usage_url = player_usage_url or os.getenv('PLAYER_USAGE_URL', 'https://nfl-player-redzone-usage-td-share-production.up.railway.app/player-usage')
         
         # GPT's calculation parameters
-        self.alpha = 0.60  # lean on opportunity (RZ usage)
+        self.alpha = 0.85  # heavily weight opportunity (RZ usage) over production (TD share)
         self.epsilon = 0.01  # floor for small samples
         
         try:
@@ -398,7 +398,8 @@ try:
             },
             "methodology": {
                 "allocation_formula": "alpha * rz_usage_share + (1 - alpha) * td_share",
-                "alpha": 0.60,
+                "alpha": 0.85,
+                "weighting": "85% RZ usage (opportunity) + 15% TD share (production)",
                 "epsilon": 0.01,
                 "anytime_probability": "1 - exp(-expected_tds)",
                 "notes": "Uses Poisson distribution for anytime touchdown probabilities"
