@@ -31,31 +31,17 @@ CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "3600"))  # 1 hour
 # how to treat unknown player→team (if any remain)
 UNKNOWN_TEAM_MODE = os.getenv("UNKNOWN_TEAM_MODE", "none").lower()  # none | average | home | away
 
-# City+mascot -> abbr
-TEAM_CITY_TO_ABBR = {
-    "Arizona Cardinals":"ARI","Atlanta Falcons":"ATL","Baltimore Ravens":"BAL","Buffalo Bills":"BUF",
-    "Carolina Panthers":"CAR","Chicago Bears":"CHI","Cincinnati Bengals":"CIN","Cleveland Browns":"CLE",
-    "Dallas Cowboys":"DAL","Denver Broncos":"DEN","Detroit Lions":"DET","Green Bay Packers":"GB",
-    "Houston Texans":"HOU","Indianapolis Colts":"IND","Jacksonville Jaguars":"JAX","Kansas City Chiefs":"KC",
-    "Los Angeles Rams":"LAR","Miami Dolphins":"MIA","Minnesota Vikings":"MIN","New England Patriots":"NE",
-    "New Orleans Saints":"NO","New York Giants":"NYG","New York Jets":"NYJ","Las Vegas Raiders":"LV",
-    "Philadelphia Eagles":"PHI","Pittsburgh Steelers":"PIT","Los Angeles Chargers":"LAC",
-    "San Francisco 49ers":"SF","Seattle Seahawks":"SEA","Tampa Bay Buccaneers":"TB",
-    "Tennessee Titans":"TEN","Washington Commanders":"WAS",
+TEAM_ABBR = {
+    "Arizona Cardinals": "ARI","Atlanta Falcons": "ATL","Baltimore Ravens": "BAL","Buffalo Bills": "BUF",
+    "Carolina Panthers": "CAR","Chicago Bears": "CHI","Cincinnati Bengals": "CIN","Cleveland Browns": "CLE",
+    "Dallas Cowboys": "DAL","Denver Broncos": "DEN","Detroit Lions": "DET","Green Bay Packers": "GB",
+    "Houston Texans": "HOU","Indianapolis Colts": "IND","Jacksonville Jaguars": "JAX","Kansas City Chiefs": "KC",
+    "Los Angeles Rams": "LAR","Miami Dolphins": "MIA","Minnesota Vikings": "MIN","New England Patriots": "NE",
+    "New Orleans Saints": "NO","New York Giants": "NYG","New York Jets": "NYJ","Las Vegas Raiders": "LV",
+    "Philadelphia Eagles": "PHI","Pittsburgh Steelers": "PIT","Los Angeles Chargers": "LAC",
+    "San Francisco 49ers": "SF","Seattle Seahawks": "SEA","Tampa Bay Buccaneers": "TB",
+    "Tennessee Titans": "TEN","Washington Commanders": "WAS",
 }
-
-# Nickname-only -> abbr  (matches your Top-200 blob exactly)
-TEAM_NICK_TO_ABBR = {
-    "Cardinals":"ARI","Falcons":"ATL","Ravens":"BAL","Bills":"BUF","Panthers":"CAR","Bears":"CHI",
-    "Bengals":"CIN","Browns":"CLE","Cowboys":"DAL","Broncos":"DEN","Lions":"DET","Packers":"GB",
-    "Texans":"HOU","Colts":"IND","Jaguars":"JAX","Chiefs":"KC","Rams":"LAR","Dolphins":"MIA",
-    "Vikings":"MIN","Patriots":"NE","Saints":"NO","Giants":"NYG","Jets":"NYJ","Raiders":"LV",
-    "Eagles":"PHI","Steelers":"PIT","Chargers":"LAC","49ers":"SF","Seahawks":"SEA","Buccaneers":"TB",
-    "Titans":"TEN","Commanders":"WAS",
-}
-
-# One lookup table that accepts either style
-TEAM_NAME_TO_ABBR = {**TEAM_CITY_TO_ABBR, **TEAM_NICK_TO_ABBR}
 
 # =========================
 # Embedded Top-200 list (from your message)
@@ -209,7 +195,7 @@ RB Austin Ekeler, Commanders
 RB Ray Davis, Bills
 QB Tua Tagovailoa, Dolphins
 RB Jaylen Wright Dolphins
-WR Brandon Aiyik, 49ers
+WR Brandon Aiyuk, 49ers
 WR Adam Thielen, Panthers
 DST Philadelphia Eagles
 RB Trey Benson, Cardinals
