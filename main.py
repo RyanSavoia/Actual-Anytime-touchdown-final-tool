@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_cors import CORS
 
 # =========================
@@ -25,27 +25,35 @@ BOOKMAKER_PRIORITY = [
     "draftkings", "fanatics", "windcreek", "espnbet", "ballybet"
 ]
 
-# cache TTL for the adjusted feed
-CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "3600"))  # 1 hour
-
-# how to treat unknown player→team (if any remain)
-UNKNOWN_TEAM_MODE = os.getenv("UNKNOWN_TEAM_MODE", "none").lower()  # none | average | home | away
-
-TEAM_ABBR = {
-    "Arizona Cardinals": "ARI","Atlanta Falcons": "ATL","Baltimore Ravens": "BAL","Buffalo Bills": "BUF",
-    "Carolina Panthers": "CAR","Chicago Bears": "CHI","Cincinnati Bengals": "CIN","Cleveland Browns": "CLE",
-    "Dallas Cowboys": "DAL","Denver Broncos": "DEN","Detroit Lions": "DET","Green Bay Packers": "GB",
-    "Houston Texans": "HOU","Indianapolis Colts": "IND","Jacksonville Jaguars": "JAX","Kansas City Chiefs": "KC",
-    "Los Angeles Rams": "LAR","Miami Dolphins": "MIA","Minnesota Vikings": "MIN","New England Patriots": "NE",
-    "New Orleans Saints": "NO","New York Giants": "NYG","New York Jets": "NYJ","Las Vegas Raiders": "LV",
-    "Philadelphia Eagles": "PHI","Pittsburgh Steelers": "PIT","Los Angeles Chargers": "LAC",
-    "San Francisco 49ers": "SF","Seattle Seahawks": "SEA","Tampa Bay Buccaneers": "TB",
-    "Tennessee Titans": "TEN","Washington Commanders": "WAS",
-}
+CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "3600"))  # 1 hour cache
+UNKNOWN_TEAM_MODE = os.getenv("UNKNOWN_TEAM_MODE", "none").lower()  # none|average|home|away
 
 # =========================
-# Embedded Top-200 list (from your message)
-# We will parse this into a player->team mapping at startup.
+# Team name → abbreviation (support city+mascot AND nickname-only)
+# =========================
+TEAM_CITY_TO_ABBR = {
+    "Arizona Cardinals":"ARI","Atlanta Falcons":"ATL","Baltimore Ravens":"BAL","Buffalo Bills":"BUF",
+    "Carolina Panthers":"CAR","Chicago Bears":"CHI","Cincinnati Bengals":"CIN","Cleveland Browns":"CLE",
+    "Dallas Cowboys":"DAL","Denver Broncos":"DEN","Detroit Lions":"DET","Green Bay Packers":"GB",
+    "Houston Texans":"HOU","Indianapolis Colts":"IND","Jacksonville Jaguars":"JAX","Kansas City Chiefs":"KC",
+    "Los Angeles Rams":"LAR","Miami Dolphins":"MIA","Minnesota Vikings":"MIN","New England Patriots":"NE",
+    "New Orleans Saints":"NO","New York Giants":"NYG","New York Jets":"NYJ","Las Vegas Raiders":"LV",
+    "Philadelphia Eagles":"PHI","Pittsburgh Steelers":"PIT","Los Angeles Chargers":"LAC",
+    "San Francisco 49ers":"SF","Seattle Seahawks":"SEA","Tampa Bay Buccaneers":"TB",
+    "Tennessee Titans":"TEN","Washington Commanders":"WAS",
+}
+TEAM_NICK_TO_ABBR = {
+    "Cardinals":"ARI","Falcons":"ATL","Ravens":"BAL","Bills":"BUF","Panthers":"CAR","Bears":"CHI",
+    "Bengals":"CIN","Browns":"CLE","Cowboys":"DAL","Broncos":"DEN","Lions":"DET","Packers":"GB",
+    "Texans":"HOU","Colts":"IND","Jaguars":"JAX","Chiefs":"KC","Rams":"LAR","Dolphins":"MIA",
+    "Vikings":"MIN","Patriots":"NE","Saints":"NO","Giants":"NYG","Jets":"NYJ","Raiders":"LV",
+    "Eagles":"PHI","Steelers":"PIT","Chargers":"LAC","49ers":"SF","Seahawks":"SEA","Buccaneers":"TB",
+    "Titans":"TEN","Commanders":"WAS",
+}
+TEAM_NAME_TO_ABBR = {**TEAM_CITY_TO_ABBR, **TEAM_NICK_TO_ABBR}
+
+# =========================
+# Embedded Top-200 (from your message)
 # =========================
 TOP200_BLOB = r"""
 WR Ja'Marr Chase, Bengals
@@ -195,7 +203,7 @@ RB Austin Ekeler, Commanders
 RB Ray Davis, Bills
 QB Tua Tagovailoa, Dolphins
 RB Jaylen Wright Dolphins
-WR Brandon Aiyuk, 49ers
+WR Brandon Aiyik, 49ers
 WR Adam Thielen, Panthers
 DST Philadelphia Eagles
 RB Trey Benson, Cardinals
@@ -257,7 +265,7 @@ app = Flask(__name__)
 CORS(app)
 
 # =========================
-# Helpers: time, odds/prob, roster parsing
+# Helpers
 # =========================
 def now_utc_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -290,46 +298,60 @@ def clamp_prob(p: float, lo: float = 0.01, hi: float = 0.95) -> float:
     return max(lo, min(hi, float(p)))
 
 def normalize_name(s: str) -> str:
+    # keep apostrophes; strip dots/commas/extra spaces; lowercase
     return " ".join((s or "").lower().replace(".", "").replace(",", "").split())
 
+# -------- Parsing: build player->team from Top-200 --------
 def parse_top200_blob(blob: str) -> Dict[str, str]:
     """
-    Parse lines like: 'WR Ja'Marr Chase, Bengals'
-    Also capture lines missing comma like 'RB Jaylen Wright Dolphins'
-    Skip DST/K lines.
+    Accept lines:
+      - 'WR Ja'Marr Chase, Bengals'
+      - 'Rashee Rice, Chiefs'   (no POS)
+      - 'RB Jaylen Wright Dolphins' (no comma)
+    Ignore D/ST and K lines.
     """
     if not blob:
         return {}
     flat: Dict[str, str] = {}
-    valid_pos = {"QB","RB","WR","TE"}
+
     # POS Name, Team
-    pat1 = re.compile(r"^\s*(QB|RB|WR|TE)\s+(.+?),\s+([A-Za-z .'\-]+)\s*$", re.MULTILINE)
-    # POS Name Team (no comma)
-    pat2 = re.compile(r"^\s*(QB|RB|WR|TE)\s+(.+?)\s+([A-Za-z .'\-]+)\s*$", re.MULTILINE)
+    pat_pos_comma = re.compile(r"^\s*(QB|RB|WR|TE)\s+(.+?),\s+([A-Za-z .'\-]+)\s*$", re.MULTILINE)
+    # POS Name Team
+    pat_pos_nocomma = re.compile(r"^\s*(QB|RB|WR|TE)\s+(.+?)\s+([A-Za-z .'\-]+)\s*$", re.MULTILINE)
+    # Name, Team   (no POS)
+    pat_nopos_comma = re.compile(r"^\s*([A-Za-z][A-Za-z .'\-]+?),\s+([A-Za-z .'\-]+)\s*$", re.MULTILINE)
 
-    def add(name: str, team_full: str):
-        name = " ".join(name.split())
-        team_full = " ".join(team_full.split())
-        abbr = TEAM_ABBR.get(team_full)
+    def add(name: str, team_label: str):
+        n = " ".join(name.split())
+        t = " ".join(team_label.split())
+        # filter out defenses/kickers by team label patterns (DST, D/ST, etc.)
+        if t.upper().startswith(("D/ST","DST")) or t.upper().startswith(("K ", "K")):
+            return
+        abbr = TEAM_NAME_TO_ABBR.get(t)
         if abbr:
-            flat[name] = abbr
+            flat[n] = abbr
 
-    for pos, name, team in pat1.findall(blob):
-        if pos in valid_pos:
+    for pos, name, team in pat_pos_comma.findall(blob):
+        add(name, team)
+    for pos, name, team in pat_pos_nocomma.findall(blob):
+        # don't overwrite if a cleaner comma version already set
+        if name not in flat:
             add(name, team)
-    for pos, name, team in pat2.findall(blob):
-        if pos in valid_pos and name not in flat:
+    for name, team in pat_nopos_comma.findall(blob):
+        if name not in flat:
             add(name, team)
+
     return flat
 
-# build player->team map from embedded blob
-PLAYER_TEAM_MAP: Dict[str, str] = {normalize_name(k): v for k, v in parse_top200_blob(TOP200_BLOB).items()}
+PLAYER_TEAM_MAP: Dict[str, str] = {
+    normalize_name(k): v for k, v in parse_top200_blob(TOP200_BLOB).items()
+}
 
 # =========================
-# Fetchers
+# Data fetchers
 # =========================
 def fetch_team_boosts() -> Dict[str, float]:
-    """Load your team TD projections and compute boost factors."""
+    """Load team TD projections and compute boost factors."""
     r = requests.get(TEAM_PROJECTIONS_URL, timeout=30)
     r.raise_for_status()
     data = r.json()
@@ -348,18 +370,22 @@ def fetch_team_boosts() -> Dict[str, float]:
     return boosts
 
 def fetch_nfl_events() -> List[Dict[str, Any]]:
-    url = f"{ODDS_BASE_URL}/sports/americanfootball_nfl/events"
+    url = f"{ODDS_API_BASE()}/sports/americanfootball_nfl/events"
     r = requests.get(url, params={"apiKey": ODDS_API_KEY}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 def fetch_anytime_market_for_event(event_id: str) -> Optional[Dict[str, Any]]:
-    url = f"{ODDS_BASE_URL}/sports/americanfootball_nfl/events/{event_id}/odds"
+    url = f"{ODDS_API_BASE()}/sports/americanfootball_nfl/events/{event_id}/odds"
     params = {"apiKey": ODDS_API_KEY, "markets": "player_anytime_td", "regions": "us"}
     r = requests.get(url, params=params, timeout=30)
     if not r.ok:
         return None
     return r.json()
+
+def ODDS_API_BASE() -> str:
+    # small helper so we can tweak base easily if needed
+    return ODDS_BASE_URL
 
 # =========================
 # Core processing
@@ -377,14 +403,15 @@ def process_anytime_for_game(game: Dict[str, Any], team_boosts: Dict[str, float]
     away_full = game.get("away_team")
     commence_time = game.get("commence_time")
 
-    home_abbr = TEAM_ABBR.get(home_full, home_full or "HOME")
-    away_abbr = TEAM_ABBR.get(away_full, away_full or "AWAY")
+    # Events use full city+mascot names
+    home_abbr = TEAM_CITY_TO_ABBR.get(home_full, home_full or "HOME")
+    away_abbr = TEAM_CITY_TO_ABBR.get(away_full, away_full or "AWAY")
 
     market = fetch_anytime_market_for_event(game_id)
     if not market:
         return out
 
-    # choose bookmaker
+    # choose bookmaker by priority
     chosen_book: Optional[Dict[str, Any]] = None
     for bk in market.get("bookmakers", []):
         if bk.get("key") in BOOKMAKER_PRIORITY:
@@ -393,7 +420,7 @@ def process_anytime_for_game(game: Dict[str, Any], team_boosts: Dict[str, float]
     if not chosen_book:
         return out
 
-    # market
+    # find player_anytime_td
     patd = None
     for m in chosen_book.get("markets", []):
         if m.get("key") == "player_anytime_td":
@@ -413,16 +440,20 @@ def process_anytime_for_game(game: Dict[str, Any], team_boosts: Dict[str, float]
         if not player_name or raw_price is None:
             continue
 
-        # price handling
+        # odds → prob
         if isinstance(raw_price, (int, float)) and 1.0 < float(raw_price) < 10.0:
+            # decimal
             book_odds_american = decimal_to_american(float(raw_price))
             book_prob = 1.0 / float(raw_price)
         else:
+            # american
             book_odds_american = int(round(float(raw_price)))
             book_prob = american_to_prob(float(book_odds_american))
 
+        # map player to team abbr
         pteam = player_team_lookup(player_name)
 
+        # apply lifts
         if pteam == home_abbr:
             adj_prob = clamp_prob(book_prob * lift_home); used_lift = lift_home
         elif pteam == away_abbr:
@@ -486,7 +517,7 @@ def refresh_all() -> Dict[str, Any]:
         except Exception as e:
             players.append({"error": f"Failed game {game.get('id','?')}: {str(e)}"})
 
-    # sort by highest positive edge (probability points)
+    # sort by highest positive edge
     players.sort(key=lambda p: p.get("edge", {}).get("probability_points", 0), reverse=True)
 
     _cache_blob = {
@@ -524,9 +555,9 @@ def root():
         "service": "Anytime TD Adjusted Odds",
         "version": "1.0",
         "endpoints": {
-            "/anytime-td-adjusted": {"GET": "Return adjusted anytime TD odds (cached or refreshed if stale)."},
+            "/anytime-td-adjusted": {"GET": "Adjusted anytime TD odds (cached or refreshed if stale)."},
             "/refresh": {"POST": "Force refresh of team projections and anytime TD odds."},
-            "/roster-stats": {"GET": "See how many players were mapped from the embedded Top-200."},
+            "/roster-stats": {"GET": "How many players were mapped from Top-200 blob."},
             "/health": {"GET": "Health check."}
         },
         "config": {
@@ -549,8 +580,8 @@ def health():
 def roster_stats():
     return jsonify({
         "players_mapped": len(PLAYER_TEAM_MAP),
-        "unknown_team_mode": UNKNOWN_TEAM_MODE,
-        "sample": dict(list(PLAYER_TEAM_MAP.items())[:12])  # normalized names -> team abbr
+        "sample": dict(list(PLAYER_TEAM_MAP.items())[:12]),  # normalized name -> team abbr
+        "notes": "Names are normalized (lowercase, strip dots/commas). Parser accepts POS and no-POS lines."
     })
 
 @app.route("/anytime-td-adjusted", methods=["GET"])
