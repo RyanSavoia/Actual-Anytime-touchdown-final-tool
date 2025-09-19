@@ -53,7 +53,7 @@ TEAM_NICK_TO_ABBR = {
 TEAM_NAME_TO_ABBR = {**TEAM_CITY_TO_ABBR, **TEAM_NICK_TO_ABBR}
 
 # =========================
-# Embedded Top-200 (from your message)
+# Embedded Top-200 list (from your message)
 # =========================
 TOP200_BLOB = r"""
 WR Ja'Marr Chase, Bengals
@@ -334,7 +334,6 @@ def parse_top200_blob(blob: str) -> Dict[str, str]:
     for pos, name, team in pat_pos_comma.findall(blob):
         add(name, team)
     for pos, name, team in pat_pos_nocomma.findall(blob):
-        # don't overwrite if a cleaner comma version already set
         if name not in flat:
             add(name, team)
     for name, team in pat_nopos_comma.findall(blob):
@@ -350,6 +349,9 @@ PLAYER_TEAM_MAP: Dict[str, str] = {
 # =========================
 # Data fetchers
 # =========================
+def ODDS_API_BASE() -> str:
+    return ODDS_BASE_URL
+
 def fetch_team_boosts() -> Dict[str, float]:
     """Load team TD projections and compute boost factors."""
     r = requests.get(TEAM_PROJECTIONS_URL, timeout=30)
@@ -376,16 +378,18 @@ def fetch_nfl_events() -> List[Dict[str, Any]]:
     return r.json()
 
 def fetch_anytime_market_for_event(event_id: str) -> Optional[Dict[str, Any]]:
+    # Force American odds to avoid mis-parsing decimal as tiny American lines
     url = f"{ODDS_API_BASE()}/sports/americanfootball_nfl/events/{event_id}/odds"
-    params = {"apiKey": ODDS_API_KEY, "markets": "player_anytime_td", "regions": "us"}
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "markets": "player_anytime_td",
+        "regions": "us",
+        "oddsFormat": "american",  # <— important
+    }
     r = requests.get(url, params=params, timeout=30)
     if not r.ok:
         return None
     return r.json()
-
-def ODDS_API_BASE() -> str:
-    # small helper so we can tweak base easily if needed
-    return ODDS_BASE_URL
 
 # =========================
 # Core processing
@@ -436,19 +440,28 @@ def process_anytime_for_game(game: Dict[str, Any], team_boosts: Dict[str, float]
         if outcome.get("name") != "Yes":
             continue
         player_name = (outcome.get("description") or "").strip()
-        raw_price = outcome.get("price")
-        if not player_name or raw_price is None:
+        price = outcome.get("price")
+        if not player_name or price is None:
             continue
 
-        # odds → prob
-        if isinstance(raw_price, (int, float)) and 1.0 < float(raw_price) < 10.0:
-            # decimal
-            book_odds_american = decimal_to_american(float(raw_price))
-            book_prob = 1.0 / float(raw_price)
+        # --- Robust price handling ---
+        is_decimal_like = False
+        if isinstance(price, (int, float)):
+            val = float(price)
+            # Decimal odds usually 1.01–30 range; also floats w/ fractional part likely decimal
+            if 1.01 <= val <= 30.0:
+                is_decimal_like = True
+            if isinstance(price, float) and not float(price).is_integer():
+                is_decimal_like = True
+
+        if is_decimal_like:
+            book_odds_american = decimal_to_american(float(price))
+            book_prob = 1.0 / float(price)
         else:
-            # american
-            book_odds_american = int(round(float(raw_price)))
+            # treat as American
+            book_odds_american = int(round(float(price)))
             book_prob = american_to_prob(float(book_odds_american))
+        # --- end price handling ---
 
         # map player to team abbr
         pteam = player_team_lookup(player_name)
@@ -581,7 +594,7 @@ def roster_stats():
     return jsonify({
         "players_mapped": len(PLAYER_TEAM_MAP),
         "sample": dict(list(PLAYER_TEAM_MAP.items())[:12]),  # normalized name -> team abbr
-        "notes": "Names are normalized (lowercase, strip dots/commas). Parser accepts POS and no-POS lines."
+        "notes": "Parser accepts POS/no-POS lines; defenses & kickers ignored. Names normalized."
     })
 
 @app.route("/anytime-td-adjusted", methods=["GET"])
