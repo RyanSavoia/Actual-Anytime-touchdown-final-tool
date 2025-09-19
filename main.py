@@ -10,301 +10,326 @@ import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class AnytimeTDOddsCalculator:
-    def __init__(self, team_analysis_url=None, player_usage_url=None):
+class AnytimeTDOddsService:
+    def __init__(self):
         """
-        Initialize Anytime TD Odds Calculator following the same pattern as working tools
+        Initialize Anytime TD Odds Service following the same pattern as working tools
         """
-        self.team_analysis_url = team_analysis_url or os.getenv('TEAM_ANALYSIS_URL', 'https://nfl-team-td-projections-production.up.railway.app/team-analysis')
-        self.player_usage_url = player_usage_url or os.getenv('PLAYER_USAGE_URL', 'https://nfl-player-redzone-usage-td-share-production.up.railway.app/player-usage')
+        self.odds_api_key = os.getenv('ODDS_API_KEY', 'd8ba5d45eca27e710d7ef2680d8cb452')
+        self.odds_base_url = 'https://api.the-odds-api.com/v4'
+        self.team_projections_url = 'https://nfl-team-td-projections-production.up.railway.app/team-analysis'
         
-        # GPT's calculation parameters
-        self.alpha = 0.85  # heavily weight opportunity (RZ usage) over production (TD share)
-        self.epsilon = 0.01  # floor for small samples
+        # Bookmaker priority (same as friend's code)
+        self.bookmaker_priority = [
+            'fanduel', 'betmgm', 'caesars', 'betrivers', 'williamhill_us',
+            'draftkings', 'fanatics', 'windcreek', 'espnbet', 'ballybet'
+        ]
+        
+        self.cached_data = None
+        self.last_refresh = None
         
         try:
-            logger.info(f"Successfully initialized calculator")
+            logger.info("Successfully initialized Anytime TD Odds Service")
         except Exception as e:
-            logger.error(f"Failed to initialize calculator: {str(e)}")
+            logger.error(f"Failed to initialize service: {str(e)}")
     
-    def fetch_team_analysis(self):
-        """Fetch team TD projections from team analysis service"""
+    def get_implied_probability(self, odds):
+        """Convert American odds to implied probability"""
         try:
-            logger.info(f"Fetching team analysis from {self.team_analysis_url}")
-            response = requests.get(self.team_analysis_url, timeout=30)
+            if odds < 0:
+                return abs(odds) / (abs(odds) + 100)
+            else:
+                return 100 / (odds + 100)
+        except Exception as e:
+            logger.error(f"Error converting odds {odds}: {str(e)}")
+            return 0.5  # Default to 50% if conversion fails
+    
+    def probability_to_odds(self, probability):
+        """Convert probability to American odds"""
+        try:
+            if probability >= 1.0:
+                return -1000  # Cap extremely high probabilities
+            elif probability <= 0.0:
+                return 1000   # Cap extremely low probabilities
+            elif probability >= 0.5:
+                return round(-100 * probability / (1 - probability))
+            else:
+                return round(100 * (1 - probability) / probability)
+        except Exception as e:
+            logger.error(f"Error converting probability {probability}: {str(e)}")
+            return -110  # Default odds
+    
+    def fetch_team_projections(self):
+        """Fetch team TD projections from Railway service"""
+        try:
+            logger.info(f"Fetching team projections from {self.team_projections_url}")
+            response = requests.get(self.team_projections_url, timeout=30)
             response.raise_for_status()
             data = response.json()
             
             if 'games' not in data:
-                raise ValueError("No games found in team analysis data")
+                raise ValueError("No games found in team projections")
             
-            logger.info(f"Successfully fetched {len(data['games'])} games")
-            return data['games']
+            # Create lookup dictionary: team -> boost factor
+            team_boosts = {}
+            for game in data['games']:
+                away_team = game['away_team']
+                home_team = game['home_team']
+                away_vegas = game['away_vegas_tds']
+                home_vegas = game['home_vegas_tds']
+                away_projected = game['away_projected_tds']
+                home_projected = game['home_projected_tds']
+                
+                # Calculate boost factors
+                if away_vegas > 0:
+                    team_boosts[away_team] = away_projected / away_vegas
+                if home_vegas > 0:
+                    team_boosts[home_team] = home_projected / home_vegas
+            
+            logger.info(f"Successfully fetched projections for {len(team_boosts)} teams")
+            return team_boosts
             
         except Exception as e:
-            logger.error(f"Failed to fetch team analysis: {str(e)}")
-            raise
+            logger.error(f"Failed to fetch team projections: {str(e)}")
+            return {}
     
-    def fetch_player_usage(self):
-        """Fetch player usage data from player usage service"""
+    def fetch_anytime_td_odds(self):
+        """Fetch anytime TD odds from the odds API"""
         try:
-            logger.info(f"Fetching player usage from {self.player_usage_url}")
-            response = requests.get(self.player_usage_url, timeout=30)
+            # Get current NFL games
+            events_url = f"{self.odds_base_url}/sports/americanfootball_nfl/events"
+            params = {
+                'apiKey': self.odds_api_key
+            }
+            
+            response = requests.get(events_url, params=params, timeout=30)
             response.raise_for_status()
-            data = response.json()
+            games = response.json()
             
-            if 'teams' not in data:
-                raise ValueError("No teams found in player usage data")
+            if not games:
+                logger.warning("No NFL games found")
+                return []
             
-            logger.info(f"Successfully fetched data for {len(data['teams'])} teams")
-            return data['teams']
+            all_player_odds = []
             
-        except Exception as e:
-            logger.error(f"Failed to fetch player usage: {str(e)}")
-            raise
-    
-    def calculate_player_allocation(self, players_data):
-        """
-        Calculate allocation weights for players using GPT's exact formula
-        alloc_raw_i = alpha * rz_usage_share_i + (1 - alpha) * td_share_i
-        """
-        try:
-            allocations = {}
-            
-            for player_name, stats in players_data.items():
-                rz_usage = stats.get('rz_usage_share', 0.0)
-                td_share = stats.get('td_share', 0.0)
-                
-                # GPT's formula
-                alloc_raw = self.alpha * rz_usage + (1 - self.alpha) * td_share
-                
-                # Apply epsilon floor for small samples
-                alloc_adj = max(alloc_raw, self.epsilon)
-                
-                allocations[player_name] = alloc_adj
-            
-            # Normalize across all players
-            total_allocation = sum(allocations.values())
-            
-            if total_allocation > 0:
-                for player_name in allocations:
-                    allocations[player_name] = allocations[player_name] / total_allocation
-            
-            return allocations
-            
-        except Exception as e:
-            logger.error(f"Error calculating player allocation: {str(e)}")
-            return {}
-    
-    def calculate_anytime_odds(self, lambda_td):
-        """
-        Convert expected TDs to anytime TD probability and American odds
-        p_anytime = 1 - exp(-lambda)
-        """
-        try:
-            # Poisson probability of at least 1 TD
-            p_anytime = 1 - math.exp(-lambda_td)
-            
-            # Convert to American odds
-            if p_anytime >= 0.5:
-                american_odds = -round(100 * p_anytime / (1 - p_anytime))
-            else:
-                american_odds = round(100 * (1 - p_anytime) / p_anytime)
-            
-            return {
-                'expected_tds': round(lambda_td, 3),
-                'anytime_probability': round(p_anytime, 3),
-                'american_odds': american_odds
-            }
-            
-        except Exception as e:
-            logger.error(f"Error calculating anytime odds: {str(e)}")
-            return None
-    
-    def process_team_players(self, team, team_td_proj, player_usage_data):
-        """Process all players for a team and calculate their anytime TD odds"""
-        try:
-            if team not in player_usage_data:
-                logger.warning(f"No player usage data found for team {team}")
-                return {}
-            
-            team_players = player_usage_data[team].get('players', {})
-            
-            if not team_players:
-                logger.warning(f"No players found for team {team}")
-                return {}
-            
-            # Calculate allocation weights
-            allocations = self.calculate_player_allocation(team_players)
-            
-            if not allocations:
-                return {}
-            
-            # Calculate anytime odds for each player
-            player_odds = {}
-            
-            for player_name, allocation in allocations.items():
-                # Expected TDs for this player
-                lambda_player = team_td_proj * allocation
-                
-                # Calculate anytime odds
-                odds_data = self.calculate_anytime_odds(lambda_player)
-                
-                if odds_data:
-                    player_stats = team_players[player_name]
-                    player_odds[player_name] = {
-                        'rz_usage_share': round(player_stats.get('rz_usage_share', 0), 4),
-                        'td_share': round(player_stats.get('td_share', 0), 4),
-                        'allocation_weight': round(allocation, 4),
-                        'expected_tds': odds_data['expected_tds'],
-                        'anytime_probability': odds_data['anytime_probability'],
-                        'american_odds': odds_data['american_odds']
-                    }
-            
-            return player_odds
-            
-        except Exception as e:
-            logger.error(f"Error processing team {team} players: {str(e)}")
-            return {}
-    
-    def calculate_all_anytime_odds(self):
-        """Calculate anytime TD odds for all games and players"""
-        try:
-            # Fetch data from both services
-            team_games = self.fetch_team_analysis()
-            player_usage_data = self.fetch_player_usage()
-            
-            results = {
-                'analysis_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'methodology': {
-                    'alpha': self.alpha,
-                    'epsilon': self.epsilon,
-                    'allocation_formula': 'alpha * rz_usage_share + (1 - alpha) * td_share',
-                    'anytime_probability': '1 - exp(-expected_tds)',
-                    'source_note': 'Team TD projections already include matchup advantages'
-                },
-                'games': []
-            }
-            
-            logger.info(f"Processing {len(team_games)} games...")
-            
-            for game in team_games:
+            # Fetch odds for each game
+            for game in games:
                 try:
-                    away_team = game['away_team']
+                    game_id = game['id']
                     home_team = game['home_team']
-                    away_projected_tds = game['away_projected_tds']
-                    home_projected_tds = game['home_projected_tds']
+                    away_team = game['away_team']
+                    commence_time = game['commence_time']
                     
-                    logger.info(f"Processing {game['game']}")
+                    # Map full team names to abbreviations
+                    team_mapping = self.get_team_abbreviations()
+                    home_abbr = team_mapping.get(home_team, home_team)
+                    away_abbr = team_mapping.get(away_team, away_team)
                     
-                    # Process away team players
-                    away_players = self.process_team_players(
-                        away_team, away_projected_tds, player_usage_data
-                    )
-                    
-                    # Process home team players  
-                    home_players = self.process_team_players(
-                        home_team, home_projected_tds, player_usage_data
-                    )
-                    
-                    game_result = {
-                        'game': game['game'],
-                        'commence_time': game.get('commence_time', 'TBD'),
-                        'bookmaker': game.get('bookmaker', 'Unknown'),
-                        'away_team': away_team,
-                        'home_team': home_team,
-                        'away_projected_tds': away_projected_tds,
-                        'home_projected_tds': home_projected_tds,
-                        'away_players': away_players,
-                        'home_players': home_players,
-                        'total_away_players': len(away_players),
-                        'total_home_players': len(home_players)
+                    # Get anytime TD odds for this game
+                    odds_url = f"{self.odds_base_url}/sports/americanfootball_nfl/events/{game_id}/odds"
+                    odds_params = {
+                        'apiKey': self.odds_api_key,
+                        'markets': 'player_anytime_td',
+                        'regions': 'us'
                     }
                     
-                    results['games'].append(game_result)
+                    odds_response = requests.get(odds_url, params=odds_params, timeout=30)
+                    if not odds_response.ok:
+                        continue
                     
+                    game_odds = odds_response.json()
+                    
+                    # Process bookmakers using priority
+                    for bookmaker in game_odds.get('bookmakers', []):
+                        if bookmaker['key'] not in self.bookmaker_priority:
+                            continue
+                        
+                        for market in bookmaker.get('markets', []):
+                            if market['key'] != 'player_anytime_td':
+                                continue
+                            
+                            for outcome in market.get('outcomes', []):
+                                if outcome.get('name') == 'Yes':
+                                    player_name = outcome.get('description', '').strip()
+                                    odds = outcome.get('price')
+                                    
+                                    if player_name and odds:
+                                        # Determine player's team
+                                        player_team = self.determine_player_team(
+                                            player_name, home_abbr, away_abbr
+                                        )
+                                        
+                                        all_player_odds.append({
+                                            'player_name': player_name,
+                                            'team': player_team,
+                                            'book_odds': odds,
+                                            'bookmaker': bookmaker['key'],
+                                            'game': f"{away_abbr} @ {home_abbr}",
+                                            'commence_time': commence_time
+                                        })
+                        
+                        break  # Use first available bookmaker from priority list
+                
                 except Exception as e:
-                    logger.warning(f"Error processing game {game.get('game', 'Unknown')}: {str(e)}")
+                    logger.warning(f"Error processing game {game.get('id', 'unknown')}: {str(e)}")
                     continue
             
-            # Sort by commence time
-            results['games'].sort(key=lambda x: x.get('commence_time', ''))
-            
-            logger.info(f"Successfully calculated odds for {len(results['games'])} games")
-            return results
+            logger.info(f"Successfully fetched {len(all_player_odds)} player anytime TD odds")
+            return all_player_odds
             
         except Exception as e:
-            logger.error(f"Error calculating anytime odds: {str(e)}")
-            return {"error": f"Analysis failed: {str(e)}"}
+            logger.error(f"Failed to fetch anytime TD odds: {str(e)}")
+            return []
     
-    def generate_json_output(self, results, include_metadata=True):
-        """Generate JSON output for API consumption"""
-        try:
-            output = {
-                "results": results,
-                "metadata": {
-                    "generated_at": datetime.now().isoformat(),
-                    "disclaimer": "For educational analysis only. Calculated using Poisson distribution for anytime touchdown probabilities."
-                } if include_metadata else None
-            }
-            
-            if not include_metadata:
-                output = {"results": results}
-                
-            return json.dumps(output, indent=2)
-            
-        except Exception as e:
-            logger.error(f"Error generating JSON output: {str(e)}")
-            return json.dumps({"error": "Failed to generate output", "message": str(e)})
-
-def run_analysis():
-    """Run analysis function - separates logic from main() for flask integration"""
-    try:
-        # Configuration - can be set via environment variables
-        team_analysis_url = os.getenv('TEAM_ANALYSIS_URL')
-        player_usage_url = os.getenv('PLAYER_USAGE_URL')
-        
-        calculator = AnytimeTDOddsCalculator(
-            team_analysis_url=team_analysis_url,
-            player_usage_url=player_usage_url
-        )
-        
-        # Calculate all anytime odds
-        results = calculator.calculate_all_anytime_odds()
-        
-        if not results or "error" in results:
-            logger.error("Failed to calculate anytime odds")
-            return None
-        
+    def get_team_abbreviations(self):
+        """Map full team names to abbreviations"""
         return {
-            'results': results,
-            'calculator': calculator
+            "Arizona Cardinals": "ARI",
+            "Atlanta Falcons": "ATL", 
+            "Baltimore Ravens": "BAL",
+            "Buffalo Bills": "BUF",
+            "Carolina Panthers": "CAR",
+            "Chicago Bears": "CHI",
+            "Cincinnati Bengals": "CIN",
+            "Cleveland Browns": "CLE",
+            "Dallas Cowboys": "DAL",
+            "Denver Broncos": "DEN",
+            "Detroit Lions": "DET",
+            "Green Bay Packers": "GB",
+            "Houston Texans": "HOU",
+            "Indianapolis Colts": "IND",
+            "Jacksonville Jaguars": "JAX",
+            "Kansas City Chiefs": "KC",
+            "Los Angeles Rams": "LAR",
+            "Miami Dolphins": "MIA",
+            "Minnesota Vikings": "MIN",
+            "New England Patriots": "NE",
+            "New Orleans Saints": "NO",
+            "New York Giants": "NYG",
+            "New York Jets": "NYJ",
+            "Las Vegas Raiders": "LV",
+            "Philadelphia Eagles": "PHI",
+            "Pittsburgh Steelers": "PIT",
+            "Los Angeles Chargers": "LAC",
+            "San Francisco 49ers": "SF",
+            "Seattle Seahawks": "SEA",
+            "Tampa Bay Buccaneers": "TB",
+            "Tennessee Titans": "TEN",
+            "Washington Commanders": "WAS"
         }
+    
+    def determine_player_team(self, player_name, home_team, away_team):
+        """
+        Determine which team a player belongs to
+        This is a simplified approach - in production you'd want a player database
+        """
+        # For now, return "TBD" - this would need a player roster lookup
+        # You could enhance this by maintaining a player->team mapping
+        return "TBD"
+    
+    def calculate_adjusted_odds(self, player_odds_list, team_boosts):
+        """Apply team boost factors to player odds"""
+        adjusted_players = []
         
-    except Exception as e:
-        logger.error(f"Analysis execution failed: {str(e)}")
-        return None
+        for player in player_odds_list:
+            try:
+                book_odds = player['book_odds']
+                team = player['team']
+                
+                # Get implied probability from book odds
+                book_probability = self.get_implied_probability(book_odds)
+                
+                # Apply team boost if available
+                boost_factor = team_boosts.get(team, 1.0)
+                adjusted_probability = book_probability * boost_factor
+                
+                # Cap probability at reasonable limits
+                adjusted_probability = max(0.01, min(0.95, adjusted_probability))
+                
+                # Convert back to odds
+                adjusted_odds = self.probability_to_odds(adjusted_probability)
+                
+                # Calculate boost percentage
+                boost_pct = ((boost_factor - 1.0) * 100) if boost_factor != 1.0 else 0
+                
+                adjusted_player = {
+                    'player_name': player['player_name'],
+                    'team': team,
+                    'game': player['game'],
+                    'commence_time': player['commence_time'],
+                    'bookmaker': player['bookmaker'],
+                    'book_odds': book_odds,
+                    'book_probability': round(book_probability, 3),
+                    'team_boost_factor': round(boost_factor, 3),
+                    'team_boost_pct': round(boost_pct, 1),
+                    'adjusted_probability': round(adjusted_probability, 3),
+                    'adjusted_odds': adjusted_odds,
+                    'has_boost': boost_factor != 1.0
+                }
+                
+                adjusted_players.append(adjusted_player)
+                
+            except Exception as e:
+                logger.error(f"Error adjusting odds for {player.get('player_name', 'unknown')}: {str(e)}")
+                continue
+        
+        return adjusted_players
+    
+    def refresh_data(self):
+        """Refresh all data and cache results"""
+        try:
+            logger.info("Starting data refresh...")
+            
+            # Fetch team projections and player odds
+            team_boosts = self.fetch_team_projections()
+            player_odds = self.fetch_anytime_td_odds()
+            
+            if not player_odds:
+                return {"error": "No anytime TD odds available"}
+            
+            # Apply team boost adjustments
+            adjusted_players = self.calculate_adjusted_odds(player_odds, team_boosts)
+            
+            # Sort by adjusted odds (best value first)
+            adjusted_players.sort(key=lambda x: x.get('adjusted_odds', 0))
+            
+            self.cached_data = {
+                'last_updated': datetime.now().isoformat(),
+                'total_players': len(adjusted_players),
+                'teams_with_boosts': len([p for p in adjusted_players if p['has_boost']]),
+                'methodology': {
+                    'boost_calculation': 'team_projected_TDs ÷ team_vegas_TDs',
+                    'adjustment_formula': 'book_probability × team_boost_factor',
+                    'probability_conversion': 'adjusted_probability → American odds'
+                },
+                'players': adjusted_players
+            }
+            self.last_refresh = datetime.now()
+            
+            logger.info(f"Data refresh complete: {len(adjusted_players)} players processed")
+            return self.cached_data
+            
+        except Exception as e:
+            logger.error(f"Error refreshing data: {str(e)}")
+            return {"error": f"Data refresh failed: {str(e)}"}
+    
+    def get_cached_data(self):
+        """Get cached data or refresh if stale/empty"""
+        try:
+            # Check if data needs refresh (older than 1 hour or no data)
+            if (not self.cached_data or 
+                not self.last_refresh or 
+                (datetime.now() - self.last_refresh).seconds > 3600):
+                return self.refresh_data()
+            
+            return self.cached_data
+            
+        except Exception as e:
+            logger.error(f"Error getting cached data: {str(e)}")
+            return {"error": f"Failed to get data: {str(e)}"}
 
-def main():
-    """Main function for command-line execution"""
-    analysis_data = run_analysis()
-    
-    if not analysis_data:
-        sys.exit(1)
-    
-    results = analysis_data['results']
-    calculator = analysis_data['calculator']
-    
-    # Output JSON for API consumption
-    json_output = calculator.generate_json_output(results)
-    print(json_output)
-    
-    # Human-readable summary to stderr for logging
-    print(f"\n=== NFL ANYTIME TD ODDS ANALYSIS ===", file=sys.stderr)
-    print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", file=sys.stderr)
-    print("="*50, file=sys.stderr)
-    
-    return results
+# Initialize service
+odds_service = AnytimeTDOddsService()
 
 # Flask Integration
 try:
@@ -316,52 +341,34 @@ try:
     
     @app.route('/anytime-td-odds', methods=['GET'])
     def get_anytime_td_odds():
-        """Calculate anytime TD odds for all games"""
+        """Get anytime TD odds with team boost adjustments"""
         try:
-            team_analysis_url = request.args.get('team_analysis_url')
-            player_usage_url = request.args.get('player_usage_url')
-            
-            # Set environment variables temporarily
-            original_env = {}
-            env_vars = {}
-            
-            if team_analysis_url:
-                env_vars['TEAM_ANALYSIS_URL'] = team_analysis_url
-            if player_usage_url:
-                env_vars['PLAYER_USAGE_URL'] = player_usage_url
-            
-            # Store original values and set new ones
-            for key, value in env_vars.items():
-                original_env[key] = os.environ.get(key)
-                os.environ[key] = value
-            
-            try:
-                # Run analysis
-                analysis_data = run_analysis()
-                
-                if not analysis_data:
-                    return jsonify({
-                        "error": "Analysis failed",
-                        "message": "Could not complete anytime TD odds calculation",
-                        "timestamp": datetime.now().isoformat()
-                    }), 500
-                
-                # Return results
-                results = analysis_data['results']
-                return jsonify(results)
-                
-            finally:
-                # Restore original environment variables
-                for key, original_value in original_env.items():
-                    if original_value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = original_value
+            data = odds_service.get_cached_data()
+            return jsonify(data)
         
         except Exception as e:
             logger.error(f"Error in Flask endpoint: {str(e)}")
             return jsonify({
                 "error": "Unexpected error",
+                "message": str(e),
+                "timestamp": datetime.now().isoformat()
+            }), 500
+    
+    @app.route('/refresh', methods=['POST'])
+    def manual_refresh():
+        """Manually refresh anytime TD odds data"""
+        try:
+            data = odds_service.refresh_data()
+            return jsonify({
+                "status": "success",
+                "message": "Data refreshed successfully",
+                "data": data
+            })
+        
+        except Exception as e:
+            logger.error(f"Error in refresh endpoint: {str(e)}")
+            return jsonify({
+                "status": "error",
                 "message": str(e),
                 "timestamp": datetime.now().isoformat()
             }), 500
@@ -372,24 +379,25 @@ try:
         return jsonify({
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "service": "Anytime TD Odds Calculator"
+            "service": "Anytime TD Odds with Team Boost",
+            "last_refresh": odds_service.last_refresh.isoformat() if odds_service.last_refresh else None
         })
     
     @app.route('/', methods=['GET'])
     def root():
         """Root endpoint with API documentation"""
         return jsonify({
-            "service": "Anytime TD Odds Calculator API",
+            "service": "Anytime TD Odds with Team Boost API",
             "version": "1.0",
             "endpoints": {
                 "/anytime-td-odds": {
                     "method": "GET",
-                    "description": "Calculate anytime TD odds for all games",
-                    "parameters": {
-                        "team_analysis_url": "Optional - URL for team analysis service",
-                        "player_usage_url": "Optional - URL for player usage service"
-                    },
-                    "example": "/anytime-td-odds?team_analysis_url=http://localhost:5000/team-analysis"
+                    "description": "Get anytime TD odds with team boost adjustments",
+                    "returns": "List of players with book odds and adjusted fair odds"
+                },
+                "/refresh": {
+                    "method": "POST",
+                    "description": "Manually refresh odds data"
                 },
                 "/health": {
                     "method": "GET", 
@@ -397,12 +405,10 @@ try:
                 }
             },
             "methodology": {
-                "allocation_formula": "alpha * rz_usage_share + (1 - alpha) * td_share",
-                "alpha": 0.85,
-                "weighting": "85% RZ usage (opportunity) + 15% TD share (production)",
-                "epsilon": 0.01,
-                "anytime_probability": "1 - exp(-expected_tds)",
-                "notes": "Uses Poisson distribution for anytime touchdown probabilities"
+                "team_boost": "projected_TDs ÷ vegas_TDs per team",
+                "player_adjustment": "book_probability × team_boost_factor",
+                "refresh_frequency": "Every hour (3600 seconds)",
+                "data_sources": ["the-odds-api.com", "team-projections-railway-service"]
             },
             "timestamp": datetime.now().isoformat()
         })
@@ -412,7 +418,7 @@ try:
         port = int(os.environ.get('PORT', 10000))
         debug = os.environ.get('DEBUG', 'False').lower() == 'true'
         
-        logger.info(f"Starting Anytime TD Odds Calculator API on port {port}")
+        logger.info(f"Starting Anytime TD Odds Service on port {port}")
         app.run(host='0.0.0.0', port=port, debug=debug)
 
 except ImportError:
@@ -431,4 +437,6 @@ if __name__ == "__main__":
             logger.error("Flask not available. Install with: pip install flask")
             sys.exit(1)
     else:
-        main()
+        # CLI mode - refresh data once and output
+        data = odds_service.refresh_data()
+        print(json.dumps(data, indent=2))
