@@ -306,21 +306,25 @@ def normalize_name(s: str) -> str:
 
 def get_nfl_week_bounds(target_date: datetime = None) -> tuple[datetime, datetime]:
     """
-    Show current week's remaining games.
-    - If it's Monday: show today's Monday Night Football
-    - Otherwise: show the next 7 days of games
+    Show one NFL week at a time:
+    - Monday: Show Monday Night Football (if any) 
+    - Tuesday-Thursday: Show upcoming week's games
+    - Friday-Sunday: Show current week's games
     """
     if target_date is None:
         target_date = datetime.now(timezone.utc)
     
-    if target_date.weekday() == 0:  # If today is Monday
-        # Show today through tomorrow (catches Monday Night Football in UTC)
+    weekday = target_date.weekday()  # Monday=0, Sunday=6
+    
+    if weekday == 0:  # Monday
+        # Show just today + tomorrow (for Monday Night Football in UTC)
         start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_dt = target_date + timedelta(days=1, hours=23, minutes=59, seconds=59)
+        end_dt = target_date + timedelta(days=1)
+        end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     else:
-        # Show next 7 days
+        # Show next 7 days (captures the current or upcoming Thursday-Monday slate)
         start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_dt = target_date + timedelta(days=7)
+        end_dt = target_date + timedelta(days=6)
         end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     
     return start_dt, end_dttuesday = week_tuesday.replace(hour=0, minute=0, second=0, microsecond=0)
