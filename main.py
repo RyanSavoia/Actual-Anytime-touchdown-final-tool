@@ -28,9 +28,6 @@ BOOKMAKER_PRIORITY = [
 CACHE_TTL_SECS = int(os.getenv("CACHE_TTL_SECS", "3600"))  # 1 hour cache
 UNKNOWN_TEAM_MODE = os.getenv("UNKNOWN_TEAM_MODE", "none").lower()  # none|average|home|away
 
-# Week filtering is always enabled - no environment variables needed
-CURRENT_WEEK_ONLY = True
-
 # =========================
 # Team name → abbreviation (support city+mascot AND nickname-only)
 # =========================
@@ -206,7 +203,7 @@ RB Austin Ekeler, Commanders
 RB Ray Davis, Bills
 QB Tua Tagovailoa, Dolphins
 RB Jaylen Wright Dolphins
-WR Brandon Aiyuk, 49ers
+WR Brandon Aiyik, 49ers
 WR Adam Thielen, Panthers
 DST Philadelphia Eagles
 RB Trey Benson, Cardinals
@@ -305,39 +302,27 @@ def normalize_name(s: str) -> str:
     return " ".join((s or "").lower().replace(".", "").replace(",", "").split())
 
 def get_nfl_week_bounds(target_date: datetime = None) -> tuple[datetime, datetime]:
-    """
-    Show one NFL week at a time:
-    - Monday: Show Monday Night Football (if any) 
-    - Tuesday-Thursday: Show upcoming week's games
-    - Friday-Sunday: Show current week's games
-    """
+    """Show one NFL week at a time"""
     if target_date is None:
         target_date = datetime.now(timezone.utc)
     
     weekday = target_date.weekday()  # Monday=0, Sunday=6
     
     if weekday == 0:  # Monday
-        # Show just today + tomorrow (for Monday Night Football in UTC)
+        # Show just today + tomorrow (for Monday Night Football)
         start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_dt = target_date + timedelta(days=1)
         end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     else:
-        # Show next 7 days (captures the current or upcoming Thursday-Monday slate)
+        # Show next 6 days
         start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_dt = target_date + timedelta(days=6)
         end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     
-    return start_dt, end_dttuesday = week_tuesday.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Show games through the next Monday (could be 6-12 days ahead depending on current day)
-    next_monday = week_tuesday + timedelta(days=6)
-    next_monday = next_monday.replace(hour=23, minute=59, second=59, microsecond=999999)
-    
-    return week_tuesday, next_monday
+    return start_dt, end_dt
 
 def filter_events_by_week(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Filter events to only include games from the current NFL week (Tuesday to Monday)."""
-    # Auto-detect current NFL week
+    """Filter events to current week"""
     start_dt, end_dt = get_nfl_week_bounds()
     
     filtered = []
@@ -346,10 +331,8 @@ def filter_events_by_week(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not commence_str:
             continue
         
-        # Parse the commence time
         commence_dt = datetime.fromisoformat(commence_str.replace('Z', '+00:00'))
         
-        # Check if it falls within the week
         if start_dt <= commence_dt <= end_dt:
             filtered.append(event)
     
@@ -431,7 +414,7 @@ def fetch_nfl_events() -> List[Dict[str, Any]]:
     r.raise_for_status()
     events = r.json()
     
-    # Apply week filtering
+    # Add this single line:
     return filter_events_by_week(events)
 
 def fetch_anytime_market_for_event(event_id: str) -> Optional[Dict[str, Any]]:
@@ -628,14 +611,12 @@ def root():
             "/anytime-td-adjusted": {"GET": "Adjusted anytime TD odds (cached or refreshed if stale)."},
             "/refresh": {"POST": "Force refresh of team projections and anytime TD odds."},
             "/roster-stats": {"GET": "How many players were mapped from Top-200 blob."},
-            "/week-info": {"GET": "Show current week filtering settings and bounds."},
             "/health": {"GET": "Health check."}
         },
         "config": {
             "TEAM_PROJECTIONS_URL": TEAM_PROJECTIONS_URL,
             "UNKNOWN_TEAM_MODE": UNKNOWN_TEAM_MODE,
-            "CACHE_TTL_SECS": CACHE_TTL_SECS,
-            "WEEK_FILTERING": "Always enabled - shows current NFL week only"
+            "CACHE_TTL_SECS": CACHE_TTL_SECS
         },
         "timestamp": now_utc_str()
     })
@@ -654,19 +635,6 @@ def roster_stats():
         "players_mapped": len(PLAYER_TEAM_MAP),
         "sample": dict(list(PLAYER_TEAM_MAP.items())[:12]),  # normalized name -> team abbr
         "notes": "Parser accepts POS/no-POS lines; defenses & kickers ignored. Names normalized."
-    })
-
-@app.route("/week-info", methods=["GET"])
-def week_info():
-    start_dt, end_dt = get_nfl_week_bounds()
-    
-    return jsonify({
-        "week_filtering_enabled": True,
-        "week_bounds": {
-            "start": start_dt.isoformat(),
-            "end": end_dt.isoformat(),
-            "description": "Auto-detected current NFL week (Tuesday to Monday)"
-        }
     })
 
 @app.route("/anytime-td-adjusted", methods=["GET"])
