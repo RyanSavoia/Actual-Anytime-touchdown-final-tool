@@ -306,23 +306,30 @@ def normalize_name(s: str) -> str:
 
 def get_nfl_week_bounds(target_date: datetime = None) -> tuple[datetime, datetime]:
     """
-    Get the Tuesday-to-Monday bounds for an NFL week.
-    If target_date is provided, find the week containing that date.
-    Otherwise, find the current week.
+    Show current week's remaining games.
+    - If it's Monday: show today's Monday Night Football
+    - Otherwise: show the next 7 days of games
     """
     if target_date is None:
         target_date = datetime.now(timezone.utc)
     
-    # Find the Tuesday that starts the week containing target_date
-    days_since_tuesday = (target_date.weekday() - 1) % 7  # Tuesday = 0
-    week_tuesday = target_date - timedelta(days=days_since_tuesday)
-    week_tuesday = week_tuesday.replace(hour=0, minute=0, second=0, microsecond=0)
+    if target_date.weekday() == 0:  # If today is Monday
+        # Show today through tomorrow (catches Monday Night Football in UTC)
+        start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = target_date + timedelta(days=1, hours=23, minutes=59, seconds=59)
+    else:
+        # Show next 7 days
+        start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = target_date + timedelta(days=7)
+        end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     
-    # Monday of the same week (6 days later)
-    week_monday = week_tuesday + timedelta(days=6)
-    week_monday = week_monday.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return start_dt, end_dttuesday = week_tuesday.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    return week_tuesday, week_monday
+    # Show games through the next Monday (could be 6-12 days ahead depending on current day)
+    next_monday = week_tuesday + timedelta(days=6)
+    next_monday = next_monday.replace(hour=23, minute=59, second=59, microsecond=999999)
+    
+    return week_tuesday, next_monday
 
 def filter_events_by_week(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Filter events to only include games from the current NFL week (Tuesday to Monday)."""
